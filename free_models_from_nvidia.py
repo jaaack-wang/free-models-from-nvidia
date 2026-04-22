@@ -130,13 +130,21 @@ def get_completion(
 
 def check_models(
     models: Iterable[str],
-    get_completion: Callable[[str, str], object]=get_completion,
+    get_completion: Callable[..., object] = get_completion,
     prompt: str = "Just say hi",
     timeout: float = 0.5,
     max_workers: Optional[int] = None,
+    probe_max_tokens: int = 1,
 ) -> Tuple[List[str], List[str]]:
     """
     Return (working_models, failed_models).
+
+    A model is considered working if:
+    - it returns within `timeout`, or
+    - it does not raise an exception before `timeout`
+
+    A model is considered failed only if:
+    - it raises an exception within `timeout`
     """
     models = list(models)
     working_models: List[str] = []
@@ -144,7 +152,16 @@ def check_models(
 
     def probe(model: str) -> Tuple[str, bool]:
         with ThreadPoolExecutor(max_workers=1) as single_executor:
-            future = single_executor.submit(get_completion, prompt, model)
+            future = single_executor.submit(
+                get_completion,
+                prompt,
+                model,
+                None,   # api_key
+                "https://integrate.api.nvidia.com/v1",  # base_url
+                0.2,    # temperature
+                probe_max_tokens,  # max_tokens
+                False,  # stream
+            )
             try:
                 future.result(timeout=timeout)
                 return model, True
@@ -169,14 +186,12 @@ def check_models(
     return working_models, failed_models
 
 
-
-
 if __name__ == "__main__":
     working_models, failed_models = check_models(
         models=FREE_MODELS,
         prompt="Just say hi",
         timeout=0.5,
-        max_workers=16,
+        max_workers=None,
     )
 
     print("Working models:")
