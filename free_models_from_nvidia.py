@@ -1,4 +1,5 @@
 import os
+import threading
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from typing import Dict, Iterator, Union, Callable, Iterable, List, Optional, Tuple
@@ -136,52 +137,44 @@ def check_models(
     max_workers: Optional[int] = None,
     probe_max_tokens: int = 1,
 ) -> Tuple[List[str], List[str]]:
-    """
-    Return (working_models, failed_models).
-
-    A model is considered working if:
-    - it returns within `timeout`, or
-    - it does not raise an exception before `timeout`
-
-    A model is considered failed only if:
-    - it raises an exception within `timeout`
-    """
     models = list(models)
     working_models: List[str] = []
     failed_models: List[str] = []
 
     def probe(model: str) -> Tuple[str, bool]:
-        with ThreadPoolExecutor(max_workers=1) as single_executor:
-            future = single_executor.submit(
-                get_completion,
-                prompt,
-                model,
-                None,   # api_key
-                "https://integrate.api.nvidia.com/v1",  # base_url
-                0.2,    # temperature
-                probe_max_tokens,  # max_tokens
-                False,  # stream
-            )
+        state = {"raised": False, "error": None}
+
+        def runner() -> None:
             try:
-                future.result(timeout=timeout)
-                return model, True
-            except TimeoutError:
-                return model, True
-            except Exception:
-                return model, False
+                get_completion(
+                    prompt=prompt,
+                    model=model,
+                    max_tokens=probe_max_tokens,
+                )
+            except Exception as e:
+                state["raised"] = True
+                state["error"] = repr(e)
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        thread.join(timeout)
+
+        if state["raised"]:
+            print(f"[FAILED FAST] {model}: {state['error']}")
+            return model, False
+
+        print(f"[WORKING OR TIMED OUT] {model}")
+        return model, True
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(probe, model) for model in models]
 
         for future in as_completed(futures):
-            try:
-                model, ok = future.result()
-                if ok:
-                    working_models.append(model)
-                else:
-                    failed_models.append(model)
-            except Exception:
-                pass
+            model, ok = future.result()   # 不要吞异常
+            if ok:
+                working_models.append(model)
+            else:
+                failed_models.append(model)
 
     return working_models, failed_models
 
